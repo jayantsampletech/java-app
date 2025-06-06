@@ -25,7 +25,7 @@ spec:
     spec:
       containers:
       - name: myjavaappcr
-        image: jayantborate14/projectcicd:pr1
+        image: jayantsampletech/javaapp:v1 
         ports:
         - containerPort: 8080
 ---
