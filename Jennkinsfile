@@ -1,0 +1,69 @@
+pipeline {
+    agent any
+
+    tools {
+        jdk 'jdk11'   // This should match the name of the JDK tool configured in Jenkins
+        maven 'maven3.8.7'  // This should match the name of the Maven tool configured in Jenkins
+    }
+    // environment {
+    //     SCANNER_HOME = tool "sonarscanner"
+    // }
+
+    stages {
+        stage('Fetch') {
+            steps {
+                git branch: 'main', credentialsId: 'git_hub', url: 'git@github.com:jayantprojects/dockerproject1.git'
+            }
+        }
+        stage('Compile') {
+            steps {
+                sh "mvn clean package"
+            }
+        }
+        stage('UniteTest') {
+            steps {
+                sh "mvn test"
+            }
+        }
+        stage('TrivyScanRepo') {
+            steps {
+                sh "trivy fs --format table -o trivy-fs-report.html ."
+            }
+        }
+        
+        stage('ScanWithSonarQube'){
+            steps {
+                // make sure the pom.xml have the cred for sonarqube and scanner is configured on jenkins
+                sh "mvn sonar:sonar"
+            }
+        }
+        stage('UploadToNexus'){
+            steps{
+                sh "mvn deploy"
+            }
+        }
+        stage('Builddockerimage '){
+            steps {
+                // Build the Docker image
+              script {
+                 docker.build("jayantborate14/projectcicd:pr1", "./")
+              } 
+            }
+        }
+        stage('PushToDockerHub'){
+            steps {
+                script {
+                    // Using docker.withRegistry to login, push, and logout from Docker registry
+                    docker.withRegistry('', 'dockerhubcred') {
+                        docker.image("jayantborate14/projectcicd:pr1").push()
+                    }
+                } 
+            }
+        }
+        stage('deploy to k8s '){
+            steps {
+            sh "kubectl --config=kf.yaml apply -f appdeployment.yaml"
+            }
+        }
+    }
+}

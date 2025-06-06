@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Namespace
+metadata: 
+  name: projectnamespace1
+---
+apiVersion: apps/v1
+kind: Deployment 
+metadata:
+  name: project1deployment
+  namespace: projectnamespace1
+spec:
+  replicas: 2
+  selector: 
+    matchLabels:
+      app: javaapp
+  strategy:  # Corrected typo
+    type: RollingUpdate  # Corrected typo
+    rollingUpdate:
+      maxUnavailable: 50%  # Corrected typo
+      maxSurge: 20%
+  template:
+    metadata:
+      labels:  # Corrected key
+        app: javaapp
+    spec:
+      containers:
+      - name: myjavaappcr
+        image: jayantborate14/projectcicd:pr1
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: project1service
+  namespace: projectnamespace1
+spec:
+  selector: 
+    app: javaapp
+  type: NodePort
+  ports:
+  - port: 8080
+    targetPort: 8080
+    nodePort: 32004
