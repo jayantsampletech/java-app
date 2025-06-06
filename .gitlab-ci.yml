@@ -1,0 +1,182 @@
+variables:
+  SONAR_SCANNER_CLI_IMAGE: sonarsource/sonar-scanner-cli:latest
+  PROJECT_KEY: java-app-project
+  PROJECT_NAME: java-app-project
+  PROJECT_VERSION: 1.0
+  IMAGE_TAG: "build-$CI_PIPELINE_IID"  
+  DOCKER_IMAGE_NAME: jayantsampletech/javaapp
+stages:
+  - build
+  - test
+  - sonar_scan
+  - quality_gate
+  - dockerbuild_and_scan
+  # - modify_image_tag
+  # - deploy
+  # - notify_slack
+build:
+  stage: build
+  image: maven:3.8.1-jdk-11  
+  script:
+    - echo "Building the code using Maven..."
+    - mvn clean package
+  artifacts:
+    paths:
+      - target/database_service_project-0.0.7.jar  
+
+# 2. Run tests with Maven
+test:
+  stage: test
+  image: maven:3.8.1-jdk-11  
+  script:
+    - echo "Running tests with Maven..."
+    - mvn test  
+  dependencies:
+    - build  # Ensures this job runs after the build job
+  artifacts:
+    paths:
+      - target/database_service_project-0.0.7.jar
+
+# SonarQube scanning job
+sonar_scan:
+  stage: sonar_scan
+  image: $SONAR_SCANNER_CLI_IMAGE
+  script:
+    - sonar-scanner \
+        -Dsonar.projectKey=$PROJECT_KEY \
+        -Dsonar.projectName="$PROJECT_NAME" \
+        -Dsonar.projectVersion=$PROJECT_VERSION \
+        -Dsonar.sources=. \
+        -Dsonar.host.url=$SONAR_HOST_URL \
+        -Dsonar.login=$SONAR_TOKEN
+  allow_failure: false
+
+# Quality Gate check job
+quality_gate:
+  stage: quality_gate
+  image: curlimages/curl:latest
+  script:
+    - echo "Waiting for SonarQube Quality Gate..."
+    - >
+      for i in {1..30}; do
+        STATUS=$(curl -s -u $SONAR_TOKEN: "$SONAR_HOST_URL/api/qualitygates/project_status?projectKey=$PROJECT_KEY" | grep -o '"status":"[^"]*"' | cut -d':' -f2 | tr -d '"')
+        echo "Attempt $i: Quality Gate Status = $STATUS"
+        if [ "$STATUS" = "OK" ]; then
+          echo "✅ Quality Gate passed."
+          exit 0
+        elif [ "$STATUS" = "ERROR" ]; then
+          echo "❌ Quality Gate failed."
+          exit 1
+        fi
+        sleep 5
+      done
+    - echo "⏱️ Timed out waiting for Quality Gate result."
+    - exit 1
+  needs:
+    - sonar_scan
+
+# Docker Image Build, Scan with Trivy and Push to Docker Hub
+dockerbuild_and_scan:
+  stage: dockerbuild_and_scan
+  image: docker:latest
+  services:
+    - docker:19.03.12-dind  
+  script:
+    - echo "Building the Docker image with tag $IMAGE_TAG..."
+    - docker build -t $DOCKER_IMAGE_NAME:$IMAGE_TAG .
+    - echo "Scanning the Docker image with Trivy..."
+    - docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --exit-code 1 --severity HIGH,CRITICAL --format table $DOCKER_IMAGE_NAME:$IMAGE_TAG  
+    - echo "Logging into DockerHub..."
+    - echo "$DOCKER_HUB_PASSWORD" | docker login -u "$DOCKER_HUB_USERNAME" --password-stdin
+    - echo "Pushing the Docker image $DOCKER_IMAGE_NAME:$IMAGE_TAG to DockerHub..."
+    - docker push $DOCKER_IMAGE_NAME:$IMAGE_TAG
+  tags:
+    - runner1 
+  dependencies:
+    - quality_gate  
+  only:
+    - main 
+  allow_failure: false
+
+# # Modify Image Tag in deployment.yaml
+# modify_image_tag:
+#   stage: modify_image_tag
+#   image: alpine:latest  
+#   script:
+#     - echo "Modifying image tag in deployment.yaml with Build Number ${CI_PIPELINE_IID}"
+#     - sed -i 's|image: .*|image: ${DOCKER_IMAGE_NAME}:${IMAGE_TAG}|' appdeployment.yaml
+#     - cat appdeployment.yaml  
+#   needs:
+#     - dockerbuild_and_scan
+#   only:
+#     - main
+
+# # Deploy the app to AWS EKS
+# deploy:
+#   stage: deploy
+#   image: amazon/aws-cli:latest
+#   script:
+#     - echo "Setting up AWS credentials"
+#     - aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+#     - aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+#     - aws configure set region $AWS_REGION
+#     - echo "Configuring Kubeconfig for AWS EKS"
+#     - mkdir -p /root/.kube
+#     - echo "$KUBECONFIG_CONTENT" > /root/.kube/config
+#     - |
+#       if [ "$DEPLOY_ENV" == "prod" ]; then
+#         if [ "$GITLAB_USER_NAME" != "teamlead_username" ]; then 
+#           echo "❌ Unauthorized user. Only the team lead can deploy to prod."
+#           exit 1
+#         fi
+#         echo "Switching to Prod context"
+#         kubectl config use-context prod-context 
+#       elif [ "$DEPLOY_ENV" == "dev" ]; then
+#         echo "Switching to Dev context"
+#         kubectl config use-context dev-context  
+#       elif [ "$DEPLOY_ENV" == "qa" ]; then
+#         echo "Switching to QA context"
+#         kubectl config use-context qa-context 
+#       else
+#         echo "Invalid environment selected!"
+#         exit 1
+#       fi
+#     - echo "Deploying to $DEPLOY_ENV environment"
+#     - kubectl apply -f deployment.yaml 
+#   needs:
+#     - modify_image_tag
+#   when: manual
+#   environment:
+#     name: $DEPLOY_ENV
+#   rules:
+#     - if: '$DEPLOY_ENV == "prod"'
+#       when: manual  
+#       start_in: 1 minute  
+#       allow_failure: false
+
+# # Slack Notification after the pipeline
+# notify_slack:
+#   stage: notify_slack
+#   image: curlimages/curl:latest  
+#   script:
+#     - |
+#       if [ "$CI_PIPELINE_STATUS" == "success" ]; then
+#         STATUS="success"
+#         MESSAGE="✅ Pipeline succeeded for build $CI_PIPELINE_IID"
+#       else
+#         STATUS="failed"
+#         MESSAGE="❌ Pipeline failed for build $CI_PIPELINE_IID"
+#       fi
+#     - |
+#       curl -X POST -H 'Content-type: application/json' \
+#         --data "{
+#           \"text\": \"$MESSAGE\",
+#           \"attachments\": [
+#             {
+#               \"title\": \"Pipeline Status\",
+#               \"text\": \"$MESSAGE\",
+#               \"color\": \"#36a64f\"
+#             }
+#           ]
+#         }" $SLACK_WEBHOOK_URL
+#   when: always  
